@@ -3,7 +3,7 @@ import pandas as pd
 from bokeh.plotting import figure, show, output_notebook
 from bokeh.layouts import column
 from bokeh.models import ColumnDataSource, HoverTool, Range1d, LinearColorMapper, CrosshairTool
-from indicators import calculate_market_bias, calculate_mtf_filter, detect_engulfing, get_stacked_liquidity
+from features.core import calculate_market_bias, calculate_mtf_filter, detect_engulfing, get_stacked_liquidity
 
 def run_synchronized_debug_bokeh(data_lake, asset, tf, n_bars, expiry):
     """

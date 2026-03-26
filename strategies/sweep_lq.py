@@ -28,26 +28,12 @@ import pandas as pd
 from pipeline.base import Strategy
 from pipeline.payload import AlphaPayload
 
-import importlib.util as _ilu, pathlib as _pl
-
-def _load_indicators():
-    _here = _pl.Path(__file__).resolve().parent
-    _ind  = _here / "indicators.py"
-    if not _ind.exists():
-        raise FileNotFoundError(
-            f"indicators.py introuvable dans {_here}\n"
-            "Copier indicators.py dans le meme dossier que sweep_lq.py"
-        )
-    _spec = _ilu.spec_from_file_location("indicators", _ind)
-    _mod  = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    return _mod
-
-_ind_mod              = _load_indicators()
-detect_engulfing      = _ind_mod.detect_engulfing
-calculate_market_bias = _ind_mod.calculate_market_bias
-calculate_mtf_filter  = _ind_mod.calculate_mtf_filter
-get_stacked_liquidity = _ind_mod.get_stacked_liquidity
+from features.core import (
+    detect_engulfing,
+    calculate_market_bias,
+    calculate_mtf_filter,
+    get_stacked_liquidity,
+)
 
 
 class SweepLQStrategy(Strategy):

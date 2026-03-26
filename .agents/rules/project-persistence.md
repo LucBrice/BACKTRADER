@@ -33,9 +33,21 @@ Maintain the following markdown structure to ensure consistent parsing by future
 # Project State
 ## Status: [GO | NO GO | IN PROGRESS]
 ## Current Phase: [Blueprint Section]
-## Blueprint Compliance: [Checklist of 10 sections]
+
+## Research Context (80/20)
+- **Assets Pool / Timeframes / Active Focus**
+
+## Blueprint Compliance (Quant R&D Pipeline)
+- [Checklist of 10 sections]
+
+## Project Architecture & Communication Flow
+```mermaid
+graph TD
+    [Mermaid Diagram]
+```
+- [Layer Descriptions]
+
 ## Active Features: [List of current tools/components]
-## Deletions / Deprecations: [History of removals]
 ## Accomplishments (Current Phase): [Bullet points]
 ## Archive (Previous Phases): [Historical summary]
 ## Roadmap: [Checklist of next steps]

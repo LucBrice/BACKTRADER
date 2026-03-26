@@ -11,8 +11,8 @@
 
 ## Blueprint Compliance (Quant R&D Pipeline)
 - [x] **Section 1: Audit & Planning** — Modules structured (`pipeline/`, `strategies/`).
-- [x] **Section 2: Data Quality** — `data.py` (Joblib Turbo Cache) implemented.
-- [x] **Section 3: Feature Engineering** — `indicators.py` + `strategies/` signal logic.
+- [x] **Section 2: Data Quality** — `data/loaders.py` (Joblib Turbo Cache) implemented.
+- [x] **Section 3: Feature Engineering** — `features/core.py` + `strategies/` signal logic.
 - [/] **Section 4: Statistical Pre-Validation** — `alpha_engine.py` + `report.py` (IN PROGRESS).
 - [ ] **Section 5: Strategy Modeling** — Entry/Exit rules implementation pending.
 - [ ] **Section 6: Backtest Engine** — VectorBT / Backtrader (Selection pending).
@@ -24,19 +24,20 @@
 ## Project Architecture & Communication Flow
 ```mermaid
 graph TD
-    Data[data.py] -->|OHLCV| Ind[indicators.py/root]
-    Ind -->|Features| Strat[strategies/sweep_lq.py]
+    Data[data/loaders.py] -->|OHLCV| Feat[features/core.py]
+    Feat -->|Features| Strat[strategies/sweep_lq.py]
     Strat -->|AlphaPayload| Engine[pipeline/alpha_engine.py]
     Engine -->|Stats Results| Runner[pipeline/runner.py]
     Runner -->|Report Data| Rep[pipeline/report.py]
     Rep -->|Interactive HTML| HTML[Reports/Section4_*.html]
-    Viz[viz_engine.py] ---|Visual Debug| Strat
+    Viz[viz/core.py] ---|Visual Debug| Strat
     Notebook[backtest_notebook.ipynb] -->|Orchestrated by| Runner
 ```
-- **Data Layer**: `data.py` provides standardized OHLCV via Joblib/LZ4 cache.
-- **Signal Layer**: `indicators.py` (logic) + `strategies/` (execution signals) define the Alpha.
+- **Data Layer**: `data/loaders.py` provides standardized OHLCV via Joblib/LZ4 cache.
+- **Feature Layer**: `features/core.py` provides pure mathematical transformations (RSI, ATR, Liquidity).
+- **Signal Layer**: `strategies/` (execution signals) assembles features and defines the Alpha.
 - **Validation Layer**: `pipeline/` (Engine + Runner + Report) handles the 4-step Alpha Test.
-- **Visualization**: `viz_engine.py` provides the Bokeh/Matplotlib hybrid debugging cockpit.
+- **Visualization**: `viz/core.py` provides the Bokeh/Matplotlib hybrid debugging cockpit.
 
 ## Active Features
 - **Turbo Cache Data Pipeline**: High-speed Joblib cache for 8 assets/8 TFs.
@@ -46,12 +47,12 @@ graph TD
 
 ## Accomplishments (Current Phase: Section 4)
 - **Engine Refinement**: Integrated Sanity Checks, Spearman ρ, and Signal Detection logic.
-- **Visual Integration**: Linked `viz_engine.py` for manual signal inspection in Section 3.
+- **Visual Integration**: Linked `viz/core.py` for manual signal inspection in Section 3.
 - **Standardization**: Aligned the notebook with the Section 4 statistical pipeline.
 
 ## Archive (Previous Phases)
 ### Section 1-3: Setup & Alpha Definition
-- Audit of existing modules and implementation of `data.py`/`indicators.py`.
+- Audit of existing modules and migration to Pareto-optimal architecture (`data/`, `features/`, `strategies/`, `pipeline/`, `viz/`).
 - Definition of the SweepLQ Alpha hypothesis.
 
 ## Roadmap (Immediate)
