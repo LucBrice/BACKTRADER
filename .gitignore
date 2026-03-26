@@ -1,0 +1,20 @@
+# --- NE PAS IGNORER (Essentiel pour tes agents) ---
+!PROJECT_STATE.md
+!.agents/
+
+# --- À IGNORER (Le surplus) ---
+__pycache__/
+.vscode/
+*.py[cod]
+
+# Dossiers de travail temporaires ou copies
+Backup/
+tmp/
+Reports/
+
+# Fichiers de données lourds (Cache & Data)
+*.joblib
+*.csv
+*.npy
+*.pkl
+*.ipynb_checkpoints/
