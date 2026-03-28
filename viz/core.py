@@ -5,6 +5,190 @@ from bokeh.layouts import column
 from bokeh.models import ColumnDataSource, HoverTool, Range1d, LinearColorMapper, CrosshairTool
 from features.core import calculate_market_bias, calculate_mtf_filter, detect_engulfing, get_stacked_liquidity
 
+# ==========================================================================================
+# 🕒 GRAPHIQUE DE DEBUG 1 : SYNC MTF BREAKDOWN (H1, H4, D1, et LTF MTF AUTH)
+# Focus : Analyse détaillée du Price Action multi-timeframe synchronisé sans gaps
+# ==========================================================================================
+def run_mtf_candlestick_visualizer(data_lake, asset, base_tf='15min', view_tfs=['15min', '1h', '4h', '1D'], window=300):
+    """
+    Renders stacked synchronized candlestick charts for detailed MTF price action analysis.
+    Uses unified integer indexing to eliminate weekend gaps.
+    Includes a 15min chart showing the MTF AUTH filter status.
+    """
+    # 1. Master Timeline (Gap-free index based on base_tf)
+    master_df = pd.DataFrame({
+        'open': data_lake[base_tf]['open'][asset], 'high': data_lake[base_tf]['high'][asset],
+        'low': data_lake[base_tf]['low'][asset], 'close': data_lake[base_tf]['close'][asset]
+    }).tail(window).copy()
+    
+    idx_master = master_df.index
+    master_df['idx'] = np.arange(window)
+    master_df['ts_str'] = idx_master.strftime('%Y-%m-%d %H:%M')
+    
+    # Pre-calculate mapping for each TF
+    def get_tf_data(tf_key):
+        # Full data for bias calculation
+        df_full = pd.DataFrame({
+            'open': data_lake[tf_key]['open'][asset], 'high': data_lake[tf_key]['high'][asset],
+            'low': data_lake[tf_key]['low'][asset], 'close': data_lake[tf_key]['close'][asset]
+        })
+        # Subset that overlaps with master timeline
+        start_ts, end_ts = idx_master[0], idx_master[-1]
+        df_view = df_full.loc[df_full.index <= end_ts].tail(int(window * 2)) # Safety margin
+        df_view = df_view.loc[df_view.index >= (start_ts - pd.Timedelta(days=2))] # Catch D1
+        
+        # Calculate Signals
+        bias_res, reason_res = calculate_market_bias(data_lake[tf_key], return_details=True)
+        bias = bias_res[[asset]].reindex(df_view.index)[asset]
+        reason = reason_res[[asset]].reindex(df_view.index)[asset]
+        sigs = detect_engulfing(df_view)
+        
+        # Map timestamps to Master Integer Indices
+        df_view['idx_master'] = np.nan
+        for ts in df_view.index:
+            try:
+                # Find nearest previous master index
+                mask = idx_master <= ts
+                if mask.any():
+                    df_view.at[ts, 'idx_master'] = master_df['idx'][mask].iloc[-1]
+            except Exception: pass
+            
+        # Filter only bars present in master view
+        df_view = df_view.dropna(subset=['idx_master'])
+        
+        # Width calculation
+        if len(df_view) > 1:
+            avg_width = np.diff(df_view['idx_master']).mean()
+            if np.isnan(avg_width) or avg_width < 1: avg_width = 1.0
+        else: avg_width = 1.0
+        
+        return {
+            'df': df_view, 'bias': bias, 'reason': reason, 'sigs': sigs, 'width': avg_width, 
+            'bias_aligned': bias.reindex(idx_master, method='ffill')
+        }
+
+    tf_results = {tf: get_tf_data(tf) for tf in view_tfs}
+    
+    # === COMPUTE AUTH AND OVERWRITE LTF BIAS (15min) ===
+    if '15min' in tf_results and '1h' in tf_results and '4h' in tf_results and '1D' in tf_results:
+        b_h1 = tf_results['1h']['bias_aligned']
+        b_h4 = tf_results['4h']['bias_aligned']
+        b_d1 = tf_results['1D']['bias_aligned']
+        
+        # Compute MTF Auth using the master aligned index
+        auth = calculate_mtf_filter(b_h1, b_h4, b_d1)
+        
+        # Update point-in-time tooltip bias matching df_view
+        df_v_15m = tf_results['15min']['df']
+        tf_results['15min']['bias'] = auth.reindex(df_v_15m.index)
+        tf_results['15min']['bias_aligned'] = auth
+        
+        # Build descriptive reasoning for MTF
+        def sig2txt(s):
+            return s.map({1.0: "BULL", -1.0: "BEAR", 0.0: "NEUTRAL"}).fillna("NaN")
+            
+        s_h1_txt = sig2txt(b_h1.reindex(df_v_15m.index))
+        s_h4_txt = sig2txt(b_h4.reindex(df_v_15m.index))
+        s_d1_txt = sig2txt(b_d1.reindex(df_v_15m.index))
+        
+        reason_series = pd.Series("NO AUTH (H1=" + s_h1_txt + " / H4=" + s_h4_txt + " / D1=" + s_d1_txt + ")", index=df_v_15m.index)
+        
+        # Create condition masks for valid AUTH
+        h1_h4 = (b_h1 == b_h4) & (b_h4 != 0)
+        h4_d1 = (b_h4 == b_d1) & (b_d1 != 0)
+        
+        auth_bull_h1h4 = h1_h4 & (b_h4 == 1.0)
+        auth_bear_h1h4 = h1_h4 & (b_h4 == -1.0)
+        auth_bull_h4d1 = h4_d1 & (b_d1 == 1.0)
+        auth_bear_h4d1 = h4_d1 & (b_d1 == -1.0)
+        
+        reason_series = reason_series.mask(auth_bull_h1h4.reindex(df_v_15m.index).fillna(False), "AUTH BULL (+1) via [H1=BULL & H4=BULL]")
+        reason_series = reason_series.mask(auth_bear_h1h4.reindex(df_v_15m.index).fillna(False), "AUTH BEAR (-1) via [H1=BEAR & H4=BEAR]")
+        reason_series = reason_series.mask(auth_bull_h4d1.reindex(df_v_15m.index).fillna(False), "AUTH BULL (+1) via [H4=BULL & D1=BULL]")
+        reason_series = reason_series.mask(auth_bear_h4d1.reindex(df_v_15m.index).fillna(False), "AUTH BEAR (-1) via [H4=BEAR & D1=BEAR]")
+        
+        tf_results['15min']['reason'] = reason_series
+    
+    # Couleurs
+    C_BULL, C_BEAR = '#26a69a', '#ef5350'
+    C_BG_BULL, C_BG_BEAR = '#4caf50', '#f44336'
+    C_WHITE, C_BLACK = '#ffffff', '#333333'
+
+    plots = []
+    master_x_range = Range1d(-0.5, window - 0.5)
+
+    for i, tf in enumerate(view_tfs):
+        res = tf_results[tf]
+        df_v = res['df']
+        sigs = res['sigs']
+        
+        # Color candles
+        is_bull_sigs = ~sigs["engulf_bull"].isna()
+        is_bear_sigs = ~sigs["engulf_bear"].isna()
+        candle_colors = []
+        for idx_v, row in enumerate(df_v.iloc):
+            ts = df_v.index[idx_v]
+            if ts in is_bull_sigs.index and is_bull_sigs.loc[ts]: color = C_BULL
+            elif ts in is_bear_sigs.index and is_bear_sigs.loc[ts]: color = C_BEAR
+            else: color = C_WHITE if row['close'] >= row['open'] else C_BLACK
+            candle_colors.append(color)
+        df_v['color'] = candle_colors
+        
+        # Map bias values and reasons for tooltips
+        df_v['bias_val'] = res['bias']
+        df_v['bias_reason'] = res['reason']
+        df_v['ts_str'] = df_v.index.strftime('%Y-%m-%d %H:%M')
+        
+        # Create Plot
+        title_text = f"🕒 {tf.upper()} (AUTH MTF) BREAKDOWN : {asset}" if tf == '15min' else f"🕒 {tf.upper()} BREAKDOWN : {asset}"
+        p = figure(title=title_text, 
+                   width=1200, height=350, tools="pan,wheel_zoom,reset,save",
+                   active_scroll="wheel_zoom", x_range=master_x_range)
+        
+        p.background_fill_color = "#fdfdfd"
+        p.add_tools(CrosshairTool(line_alpha=0.3, line_color="gray"))
+        
+        # Bias Background
+        df_bias = pd.DataFrame({
+            'idx': master_df['idx'], 
+            'val': res['bias_aligned'].values,
+            'ts_str': master_df['ts_str']
+        })
+        df_bias['color'] = df_bias['val'].map({1: C_BG_BULL, -1: C_BG_BEAR, 0: 'transparent'})
+        
+        y_min, y_max = df_v['low'].min(), df_v['high'].max()
+        p.rect(x='idx', y=(y_min+y_max)/2, width=1, height=(y_max-y_min)*2, 
+               fill_color='color', fill_alpha=0.08, line_color=None, source=ColumnDataSource(df_bias), level='underlay')
+
+        # Candles
+        w = res['width'] * 0.8
+        src_v = ColumnDataSource(df_v)
+        p.segment(x0='idx_master', y0='low', x1='idx_master', y1='high', color='black', source=src_v)
+        vbar = p.vbar(x='idx_master', width=w, top='open', bottom='close', 
+                      fill_color='color', line_color='black', source=src_v)
+
+        p.add_tools(HoverTool(renderers=[vbar], tooltips=[
+            ("Time", "@ts_str"), 
+            ("Bias", "@bias_val"),
+            ("Reason", "@bias_reason")
+        ]))
+        
+        plots.append(p)
+
+    # Shared Axis Labeling (Bottom chart only)
+    tick_indices = np.arange(0, window, max(1, window // 10))
+    plots[-1].xaxis.ticker = tick_indices
+    plots[-1].xaxis.major_label_overrides = {int(i): master_df['ts_str'].iloc[int(i)] for i in tick_indices}
+    for p in plots[:-1]: p.xaxis.visible = False
+
+    layout = column(*plots, sizing_mode="stretch_width")
+    output_notebook()
+    show(layout)
+
+# ==========================================================================================
+# 📊 GRAPHIQUE DE DEBUG 2 : TOTAL QUANT COCKPIT (V8.3)
+# Focus : Visualisation unifiée, Liquidité Stackée, et Rubans de Biais MTF
+# ==========================================================================================
 def run_synchronized_debug_bokeh(data_lake, asset, tf, n_bars, expiry):
     """
     Renders an interactive Bokeh dashboard for trading strategy debugging.
@@ -121,143 +305,3 @@ def run_synchronized_debug_bokeh(data_lake, asset, tf, n_bars, expiry):
     layout = column(p_main, p_auth, p_h1, p_h4, p_d1, sizing_mode="stretch_width")
     output_notebook()
     show(layout)
-
-def run_mtf_candlestick_visualizer(data_lake, asset, base_tf='1h', view_tfs=['1h', '4h', '1D'], window=300):
-    """
-    Renders 3 stacked synchronized candlestick charts for detailed MTF price action analysis.
-    Uses unified integer indexing to eliminate weekend gaps.
-    """
-    # 1. Master Timeline (Gap-free index)
-    master_df = pd.DataFrame({
-        'open': data_lake[base_tf]['open'][asset], 'high': data_lake[base_tf]['high'][asset],
-        'low': data_lake[base_tf]['low'][asset], 'close': data_lake[base_tf]['close'][asset]
-    }).tail(window).copy()
-    
-    idx_master = master_df.index
-    master_df['idx'] = np.arange(window)
-    master_df['ts_str'] = idx_master.strftime('%Y-%m-%d %H:%M')
-    
-    # Pre-calculate mapping for each TF
-    def get_tf_data(tf_key):
-        # Full data for bias calculation
-        df_full = pd.DataFrame({
-            'open': data_lake[tf_key]['open'][asset], 'high': data_lake[tf_key]['high'][asset],
-            'low': data_lake[tf_key]['low'][asset], 'close': data_lake[tf_key]['close'][asset]
-        })
-        # Subset that overlaps with master timeline
-        start_ts, end_ts = idx_master[0], idx_master[-1]
-        df_view = df_full.loc[df_full.index <= end_ts].tail(int(window * 1.5)) # Safety margin
-        df_view = df_view.loc[df_view.index >= (start_ts - pd.Timedelta(days=2))] # Catch D1
-        
-        # Calculate Signals
-        bias_res, reason_res = calculate_market_bias(data_lake[tf_key], return_details=True)
-        bias = bias_res[[asset]].reindex(df_view.index)[asset]
-        reason = reason_res[[asset]].reindex(df_view.index)[asset]
-        sigs = detect_engulfing(df_view)
-        
-        # Map timestamps to Master Integer Indices
-        # We find the integer Master index for each TF bar's timestamp
-        df_view['idx_master'] = np.nan
-        for ts in df_view.index:
-            try:
-                # Find nearest previous master index (the start of the bar in master)
-                mask = idx_master <= ts
-                if mask.any():
-                    df_view.at[ts, 'idx_master'] = master_df['idx'][mask].iloc[-1]
-            except Exception: pass
-            
-        # Filter only bars present in master view
-        df_view = df_view.dropna(subset=['idx_master'])
-        
-        # Width calculation (how many master bars does one TF bar cover?)
-        # Base TF has width 1. H4 has width 4 (if base is H1). D1 has 24.
-        # We auto-detect this.
-        if len(df_view) > 1:
-            avg_width = np.diff(df_view['idx_master']).mean()
-            if np.isnan(avg_width) or avg_width < 1: avg_width = 1.0
-        else: avg_width = 1.0
-        
-        return {
-            'df': df_view, 'bias': bias, 'reason': reason, 'sigs': sigs, 'width': avg_width, 
-            'bias_aligned': bias.reindex(idx_master, method='ffill')
-        }
-
-    tf_results = {tf: get_tf_data(tf) for tf in view_tfs}
-    
-    # Couleurs
-    C_BULL, C_BEAR = '#26a69a', '#ef5350'
-    C_BG_BULL, C_BG_BEAR = '#4caf50', '#f44336'
-    C_WHITE, C_BLACK = '#ffffff', '#333333'
-
-    plots = []
-    master_x_range = Range1d(-0.5, window - 0.5)
-
-    for i, tf in enumerate(view_tfs):
-        res = tf_results[tf]
-        df_v = res['df']
-        sigs = res['sigs']
-        
-        # Color candles
-        is_bull_sigs = ~sigs["engulf_bull"].isna()
-        is_bear_sigs = ~sigs["engulf_bear"].isna()
-        candle_colors = []
-        for idx_v, row in enumerate(df_v.iloc):
-            ts = df_v.index[idx_v]
-            if ts in is_bull_sigs.index and is_bull_sigs.loc[ts]: color = C_BULL
-            elif ts in is_bear_sigs.index and is_bear_sigs.loc[ts]: color = C_BEAR
-            else: color = C_WHITE if row['close'] >= row['open'] else C_BLACK
-            candle_colors.append(color)
-        df_v['color'] = candle_colors
-        df_v['bias_val'] = res['bias']
-        df_v['bias_reason'] = res['reason']
-        df_v['ts_str'] = df_v.index.strftime('%Y-%m-%d %H:%M')
-        
-        # Create Plot
-        p = figure(title=f"🕒 {tf.upper()} BREAKDOWN : {asset}", 
-                   width=1200, height=350, tools="pan,wheel_zoom,reset,save",
-                   active_scroll="wheel_zoom", x_range=master_x_range)
-        
-        p.background_fill_color = "#fdfdfd"
-        p.add_tools(CrosshairTool(line_alpha=0.3, line_color="gray"))
-        
-        # Bias Background
-        # We use a rect covering the Whole Y range for each bar in master
-        df_bias = pd.DataFrame({
-            'idx': master_df['idx'], 
-            'val': res['bias_aligned'].values,
-            'ts_str': master_df['ts_str']
-        })
-        df_bias['color'] = df_bias['val'].map({1: C_BG_BULL, -1: C_BG_BEAR, 0: 'transparent'})
-        
-        y_min, y_max = df_v['low'].min(), df_v['high'].max()
-        padding = (y_max - y_min) * 0.1
-        
-        p.rect(x='idx', y=(y_min+y_max)/2, width=1, height=(y_max-y_min)*2, 
-               fill_color='color', fill_alpha=0.08, line_color=None, source=ColumnDataSource(df_bias), level='underlay')
-
-        # Candles
-        # Width is derived from TF (1, 4, 24 if base is H1)
-        w = res['width'] * 0.8
-        src_v = ColumnDataSource(df_v)
-        p.segment(x0='idx_master', y0='low', x1='idx_master', y1='high', color='black', source=src_v)
-        vbar = p.vbar(x='idx_master', width=w, top='open', bottom='close', 
-                      fill_color='color', line_color='black', source=src_v)
-
-        p.add_tools(HoverTool(renderers=[vbar], tooltips=[
-            ("Time", "@ts_str"), 
-            ("Bias", "@bias_val"),
-            ("Reason", "@bias_reason")
-        ]))
-        
-        plots.append(p)
-
-    # Shared Axis Labeling (Bottom chart only)
-    tick_indices = np.arange(0, window, max(1, window // 10))
-    plots[-1].xaxis.ticker = tick_indices
-    plots[-1].xaxis.major_label_overrides = {int(i): master_df['ts_str'].iloc[int(i)] for i in tick_indices}
-    for p in plots[:-1]: p.xaxis.visible = False
-
-    layout = column(*plots, sizing_mode="stretch_width")
-    output_notebook()
-    show(layout)
-
