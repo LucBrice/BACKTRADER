@@ -29,6 +29,7 @@ using the 10-section blueprint below.
 | File | When to read |
 |------|-------------|
 | `references/section4-alpha-pipeline.md` | Before implementing or debugging Section 4 (full architecture, code specs, known bugs, real benchmark results) |
+| `strategies/[nom].md` | Before working on any named strategy — read the specific skill file matching the strategy name. If absent → invoke `strategy-decomposition` to create it first. |
 
 ## Quant Desk — Skills Disponibles
 
@@ -39,6 +40,7 @@ Ces skills sont complémentaires et s'activent aux points marqués `[→ skill-n
 | `quant-regime` | Détection régime + validation EBTA complète | S4, S5, S8, S10 |
 | `quant-risk` | VaR, CVaR, drawdown portefeuille, stress tests | S6, S8, S9, S10 |
 | `quant-portfolio` | Allocation capital multi-stratégies, corrélation | S10 |
+| `strategy-decomposition` | Intégrer une nouvelle stratégie dans le pipeline S4 : classification, payloads A/B/C/D, création `strategies/[nom].md`, mise à jour `report_synthesis.py` | S1, S3, S4 |
 
 > Invoquer la skill concernée dès qu'un point d'ancrage est atteint.
 
@@ -216,7 +218,15 @@ assert pnl_detrended > 0, "STOP — profit expliqué par biais de position, pas 
 > **Règle** : si `pnl_detrended <= 0` → la stratégie capture la tendance, pas un alpha réel → REJETÉ.
 > [→ quant-regime] pour validation EBTA par régime et IC conditionnel complets.
 
-Adding a new strategy = implement one method only:
+Adding a new strategy — 2 étapes obligatoires :
+
+**Étape 1 — Invoquer `strategy-decomposition` avant tout code**
+> Ce skill classe la stratégie, définit les payloads A/B/C/D,
+> crée `strategies/[nom].md` et met à jour `report_synthesis.py`.
+> Ne jamais implémenter `build_payload()` sans avoir exécuté cette étape.
+> [→ strategy-decomposition]
+
+**Étape 2 — Implémenter une seule méthode**
 ```python
 class MyStrategy(Strategy):
     name = "MyStrategy"
