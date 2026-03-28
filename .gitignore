@@ -18,3 +18,5 @@ Reports/
 *.npy
 *.pkl
 *.ipynb_checkpoints/
+
+Daily bias prediction.txt   

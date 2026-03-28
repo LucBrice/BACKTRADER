@@ -32,20 +32,47 @@ def detect_engulfing(df):
 # =========================================================
 # 🌍 MODULE 2 : MARKET BIAS & MTF FILTER
 # =========================================================
-def calculate_market_bias(df):
+def calculate_market_bias(df, return_details=False):
     h, l, o, c = df["high"], df["low"], df["open"], df["close"]
     h1, h2, l1, l2, o1, o2, c1, c2 = h.shift(1), h.shift(2), l.shift(1), l.shift(2), o.shift(1), o.shift(2), c.shift(1), c.shift(2)
     bh2, bl2 = np.maximum(o2, c2), np.minimum(o2, c2)
-
-    bull = ((h1 > h2) & (c1 > h2)) | ((l1 < l2) & (c1 > l2)) | ((h1 > h2) & (l1 < l2) & (c1 > bh2))
-    bear = ((l1 < l2) & (c1 < l2)) | ((h1 > h2) & (c1 < h2)) | ((h1 > h2) & (l1 < l2) & (c1 < bl2))
-
-    bias = c.copy()
-    bias.values[:] = 0.0
+ 
+    engulf        = (h1 > h2) & (l1 < l2)
+    engulf_bull   = engulf & (c1 > bh2)
+    engulf_bear   = engulf & (c1 < bl2)
+    engulf_neutre = engulf & (c1 >= bl2) & (c1 <= bh2)
+ 
+    bullish1 = (h1 > h2) & (c1 > h2)
+    bullish2 = (l1 < l2) & (c1 > l2)
+    bearish1 = (l1 < l2) & (c1 < l2)
+    bearish2 = (h1 > h2) & (c1 < h2)
+ 
+    bull = engulf_bull | ((bullish1 | bullish2) & ~engulf)
+    bear = engulf_bear | ((bearish1 | bearish2) & ~engulf)
+ 
+    bias = c.copy() * 0.0
     bias[bull] = 1.0
     bias[bear] = -1.0
-    return bias
-
+    bias[engulf_neutre] = 0.0
+    
+    if not return_details:
+        return bias
+        
+    if isinstance(c, pd.DataFrame):
+        reason = pd.DataFrame("Neutral", index=c.index, columns=c.columns)
+    else:
+        reason = pd.Series("Neutral", index=c.index)
+        
+    reason = reason.mask(engulf_bull, "Bullish (Engulfing)")
+    reason = reason.mask(bullish1 & ~engulf, "Bullish (H1>H2 & C1>H2)")
+    reason = reason.mask(bullish2 & ~engulf, "Bullish (L1<L2 & C1>L2)")
+    reason = reason.mask(engulf_bear, "Bearish (Engulfing)")
+    reason = reason.mask(bearish1 & ~engulf, "Bearish (L1<L2 & C1<L2)")
+    reason = reason.mask(bearish2 & ~engulf, "Bearish (H1>H2 & C1<H2)")
+    reason = reason.mask(engulf_neutre, "Neutral (Engulfing)")
+    
+    return bias, reason
+ 
 def calculate_mtf_filter(b_h1, b_h4, b_d1):
     h1_h4, h4_d1 = (b_h1 == b_h4) & (b_h4 != 0), (b_h4 == b_d1) & (b_d1 != 0)
     auth = b_h4.copy()
