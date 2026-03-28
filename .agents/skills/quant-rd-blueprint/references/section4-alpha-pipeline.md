@@ -328,6 +328,71 @@ bias[bear] = -1.0
 
 ---
 
+## 4.9 — ReportContext Contract (report.py)
+
+**Principe** : `report.py` est agnostique à la stratégie. Les interprétations JS
+hardcodées couvrent le cas générique. Toute stratégie dont la sémantique diverge
+du cas générique DOIT fournir un `ReportContext` pour surcharger les messages
+concernés. Ce contrat est aussi formel que `AlphaPayload`.
+
+### Dataclass
+
+```python
+@dataclass
+class ReportContext:
+    strategy_name:        str
+    strategy_type:        str          # "mean_reversion" | "trend" | "hybrid_pullback" | "breakout" | ...
+    alpha_threshold_bps:  float = 5.0  # seuil exploitabilité boxplot (défaut générique = 5 bps)
+    interp_overrides:     dict  = field(default_factory=dict)
+```
+
+### Clés reconnues par `interp_overrides`
+
+| Clé | Cas générique surchargé | Quand l'utiliser |
+|-----|------------------------|-----------------|
+| `"boxplot_nogo"` | "Signal inversé ou logique d'entrée incorrecte" | Si alphaL <= 0 a une autre sémantique pour la stratégie |
+| `"boxplot_weak"` | "Alpha insuffisant — renforcer les conditions d'entrée" | Si la faiblesse peut s'expliquer par dilution plutôt qu'absence d'edge |
+| `"rolling_fragile"` | "Identifier la variable de régime corrélant avec les zones positives" | Pour orienter vers des variables de régime spécifiques à la stratégie |
+| `"radar_discrimination"` | "Revoir les conditions de sortie ou l'horizon H" | Si le Step 2 échoue pour une raison structurelle connue |
+| `"radar_exploitability"` | "Ajuster les seuils d'entrée ou l'horizon H" | Si le Step 3 échoue et qu'une comparaison inter-payloads est nécessaire |
+
+### Règles
+
+- `ReportContext` est **optionnel** — si absent, toutes les interprétations génériques s'appliquent
+- Les overrides sont **additifs** — seuls les cas atteints affichent le message surchargé
+- `alpha_threshold_bps` remplace globalement le seuil de 5 bps dans toutes les interprétations boxplot
+- Chaque stratégie dans `strategies/` DOIT documenter son `ReportContext` dans son skill dédié
+
+### Intégration dans generate_html_report()
+
+```python
+def generate_html_report(
+    all_results:    list[dict],
+    tf:             str,
+    horizon_h:      int,
+    report_context: ReportContext | None = None,   # ← nouveau paramètre
+    output_dir:     str = OUTPUT_DIR,
+    open_browser:   bool = True,
+) -> str: ...
+```
+
+Le contexte est sérialisé en JSON et injecté dans le bloc JS du rapport :
+
+```javascript
+// Dans le HTML généré :
+const STRATEGY_CTX = { strategy_type: "hybrid_pullback", alpha_threshold_bps: 3.0, overrides: {...} };
+// Les fonctions interp vérifient STRATEGY_CTX.overrides[key] avant d'afficher le message générique
+```
+
+### Stratégies de référence et leur ReportContext
+
+| Stratégie | Fichier skill | strategy_type | alpha_threshold_bps |
+|-----------|--------------|---------------|-------------------|
+| SweepLQ | `strategies/sweep-lq.md` | `hybrid_pullback` | 3.0 |
+| *(futures)* | `strategies/xxx.md` | à définir | à définir |
+
+---
+
 ## 4.8 — GO / NO GO Gates Summary
 
 | Test | GO Threshold | Note |

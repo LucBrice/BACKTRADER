@@ -21,7 +21,7 @@ import numpy as np
 
 from pipeline.base import Strategy
 from pipeline.alpha_engine import alpha_pipeline
-from pipeline.report import generate_html_report
+from pipeline.report import generate_html_report, ReportContext
 
 
 # ============================================================
@@ -232,6 +232,9 @@ def run_section4_all_assets(
     generate_report: bool = True,
     open_browser:    bool = True,
     output_dir:      str  = OUTPUT_DIR,
+    report_context:  ReportContext | None = None,
+    report_label:    str | None = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     Scanne TOUS les actifs disponibles + génère le rapport HTML.
@@ -252,7 +255,8 @@ def run_section4_all_assets(
     --------
     pd.DataFrame — synthèse par actif, triée GO > NO GO > Tests_OK desc.
     """
-    params = params or {"horizon_h": DEFAULT_HORIZON_H}
+    params = dict(params or {"horizon_h": DEFAULT_HORIZON_H})
+    params.update(kwargs) # Injecte payload ou autre paramètre direct
     horizon_h = params.get("horizon_h", DEFAULT_HORIZON_H)
 
     if tf not in aligned_data:
@@ -303,7 +307,8 @@ def run_section4_all_assets(
     print(f"  ❌ NO GO ({len(nogo_list)}) : {', '.join(nogo_list) or '—'}")
 
     if generate_report and all_results:
-        generate_html_report(all_results, tf, horizon_h, output_dir, open_browser)
-        print(f"  → {output_dir}/Section4_Report_{tf}.html")
+        generate_html_report(all_results, tf, horizon_h, report_context=report_context, output_dir=output_dir, open_browser=open_browser, report_label=report_label)
+        label = report_label if report_label else tf
+        print(f"  → {output_dir}/Section4_Report_{label}.html")
 
     return df_s

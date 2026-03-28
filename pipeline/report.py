@@ -14,12 +14,26 @@ et génère un fichier HTML autonome avec :
 Point d’entrée : generate_html_report(all_results, tf, horizon_h, ...)
 """
 
+from __future__ import annotations
 import os
 import json
 import webbrowser
+from dataclasses import dataclass, field
 import numpy as np
 
 OUTPUT_DIR = "Reports"
+
+
+@dataclass
+class ReportContext:
+    """
+    Context contract for strategy-specific report interpretations.
+    Enables overriding generic JS messages and dynamic thresholds.
+    """
+    strategy_name:       str = "GenericStrategy"
+    strategy_type:       str = "trend"        # "mean_reversion" | "trend" | "hybrid_pullback" | "breakout"
+    alpha_threshold_bps: float = 5.0  # exploitability threshold (default = 5 bps)
+    overrides:           dict  = field(default_factory=dict)
 
 def _hist_bins(data, n_bins=60):
     if not data: return {"labels": [], "values": []}
@@ -48,9 +62,14 @@ def _boxplot_stats(data):
 
 
 def generate_html_report(all_results, tf, horizon_h,
-                          output_dir=OUTPUT_DIR, open_browser=True):
+                          report_context: ReportContext | None = None,
+                          output_dir=OUTPUT_DIR, open_browser=True,
+                          report_label: str | None = None):
     os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, f"Section4_Report_{tf}.html")
+    
+    # Use report_label if provided, fallback to tf
+    label = report_label if report_label else tf
+    filepath = os.path.join(output_dir, f"Section4_Report_{label}.html")
 
     tf_min_str = tf.replace("min","").replace("h","60")
     try:    tf_min = int(tf_min_str)
@@ -131,10 +150,16 @@ def generate_html_report(all_results, tf, horizon_h,
         def default(self, o):
             if isinstance(o, (int,)) or hasattr(o, "item"): return o.item() if hasattr(o,"item") else o
             return super().default(o)
-    data_json    = json.dumps(assets_data, ensure_ascii=False, cls=NpEnc)
-    go_count     = sum(1 for a in assets_data if a["is_go"])
-    nogo_count   = len(assets_data) - go_count
-    horizon_min  = horizon_h * tf_min
+    data_json     = json.dumps(assets_data, ensure_ascii=False, cls=NpEnc)
+    ctx_json      = json.dumps({
+        "strategy_type": report_context.strategy_type,
+        "alpha_threshold_bps": report_context.alpha_threshold_bps,
+        "overrides": report_context.overrides
+    }, ensure_ascii=False) if report_context else "null"
+
+    go_count      = sum(1 for a in assets_data if a["is_go"])
+    nogo_count    = len(assets_data) - go_count
+    horizon_min   = horizon_h * tf_min
     strategy_name = all_results[0].get("strategy", "—") if all_results else "—" 
 
     HTML = f"""<!DOCTYPE html>
@@ -437,6 +462,7 @@ footer{{margin-top:2.5rem;padding:1.3rem 2.5rem;border-top:1px solid var(--borde
 
 <script>
 const D = {data_json};
+const STRATEGY_CTX = {ctx_json};
 Chart.defaults.color='#6b728f';
 
 // ── Tooltips ─────────────────────────────────────────────────────────────
@@ -1073,6 +1099,8 @@ function interpBoxplot(d){{
   const alphaL = medF!=null ? (medL-medF).toFixed(2) : null;
   const alphaS = medF!=null&&medS!=null ? (medS-medF).toFixed(2) : null;
 
+  const thresh = STRATEGY_CTX?.alpha_threshold_bps ?? 5;
+
   // Verdict boxplot
   const longOk = medL > medF + 2;
   const shortOk = medS != null && medS > medF + 2;
@@ -1089,9 +1117,9 @@ function interpBoxplot(d){{
     : `IQR Long comparable à Flat — dispersion normale.`;
 
   const alphaComment = alphaL
-    ? (Math.abs(alphaL)>5 ? `Alpha net <b>${{alphaL}} bps</b> au-dessus du seuil de 5 bps.`
-       : Math.abs(alphaL)>2 ? `Alpha net <b>${{alphaL}} bps</b> — edge présent mais faible (seuil : > 5 bps).`
-       : `Alpha net <b>${{alphaL}} bps</b> — en dessous du seuil d'exploitabilité de 5 bps.`)
+    ? (alphaL > thresh ? `Alpha net <b>${{alphaL}} bps</b> au-dessus du seuil de ${{thresh}} bps.’`
+       : alphaL > 0 ? (STRATEGY_CTX?.overrides?.boxplot_weak ?? `Alpha net <b>${{alphaL}} bps</b> — edge présent mais faible (seuil : > ${{thresh}} bps).’`)
+       : (STRATEGY_CTX?.overrides?.boxplot_nogo ?? `Alpha net <b>${{alphaL}} bps</b> — en dessous du seuil d’exploitabilité de ${{thresh}} bps.’`))
     : '';
 
   const shortComment = medS!=null
@@ -1128,9 +1156,9 @@ function interpRadar(d){{
     const missing = failed_names[0]||'';
     verdict = `3/4 — Bloqué à ${{missing}}`; vClass = 'ivd-warn';
     insight = `Signal presque complet — seule l'étape <b>${{missing}}</b> bloque. ${{
-      !d.step1_ok?'Aucune corrélation signal→rendement détectée. Revoir la logique d’entrée.':
-      !d.step2_ok?'Les distributions Long/Short et Flat ne diffèrent pas statistiquement. Vérifier les conditions de sortie.':
-      !d.step3_ok?'Pas de tendance monotone entre les classes de signal. Revoir les seuils ou l’horizon H.':''
+      !d.step1_ok?'Aucune corrélation signal→rendement détectée. Revoir la logique d’entrée.’':
+      !d.step2_ok?(STRATEGY_CTX?.overrides?.radar_discrimination ?? 'Les distributions Long/Short et Flat ne diffèrent pas statistiquement. Vérifier les conditions de sortie.’'):
+      !d.step3_ok?(STRATEGY_CTX?.overrides?.radar_exploitability ?? 'Pas de tendance monotone entre les classes de signal. Revoir les seuils ou l’horizon H.’'):''
     }}`;
   }} else if (passed >= 1) {{
     verdict = `${{passed}}/4 — Edge partiel`; vClass = 'ivd-ng';

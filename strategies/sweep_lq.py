@@ -1,33 +1,8 @@
-"""
-strategies/sweep_lq.py
-======================
-Stratégie : FausseCassure_LiquiditySweep
-
-Logique :
-  1. Prix touche un niveau LQ (bull pool ou bear pool)
-  2. Dans les w2_bars suivantes, formation d'un engulfing dans la bonne direction
-  3. Signal à la clôture de l'engulfing
-
-Filtre optionnel : MTF AUTH (H1==H4 OR H4==D1)
-  BUY  uniquement si MTF == +1
-  SELL uniquement si MTF == -1
-
-Paramètres :
-  horizon_h      : barres forward pour le calcul Y (Section 4)
-  expiry_days    : durée de vie des niveaux LQ
-  w2_bars        : fenêtre max entre sweep et engulfing de confirmation
-  tf_minutes     : résolution TF
-  use_bias_filter: True = filtre MTF actif
-  mono_position  : True = une seule position à la fois (build_payload)
-                   False = tous les setups (debug)
-"""
-
 from __future__ import annotations
-import numpy as np
 import pandas as pd
+import numpy as np
 from pipeline.base import Strategy
 from pipeline.payload import AlphaPayload
-
 from features.core import (
     detect_engulfing,
     calculate_market_bias,
@@ -35,227 +10,154 @@ from features.core import (
     get_stacked_liquidity,
 )
 
-
 class SweepLQStrategy(Strategy):
+    """
+    SweepLQ Strategy Implementation for Section 4 Alpha Pipeline.
+    Supports 4 payload types:
+    A - MTF Filter only
+    B - Engulfing only
+    C - Engulfing + MTF Aligned
+    D - Sequence: MTF Bias -> Liquidity Sweep -> Engulfing within 8 bars
+    """
+    name = "SweepLQ"
 
-    name = "FausseCassure_MTF_LiquiditySweep"
-
-    DEFAULT_PARAMS = {
-        "horizon_h":       8,
-        "expiry_days":     3,
-        "w2_bars":        10,
-        "tf_minutes":     15,
-        "use_bias_filter": True,
-        "mono_position":   True,
-    }
-
-    # ── MTF AUTH ──────────────────────────────────────────────────────────
-    def _compute_mtf_auth(self, df: pd.DataFrame, params: dict) -> np.ndarray:
-        bias_h1 = calculate_market_bias(df)
-        df_h4, df_d1 = None, None
-
-        if "df_h4" in params and "df_d1" in params:
-            df_h4 = params["df_h4"]
-            df_d1 = params["df_d1"]
-        elif "aligned_data" in params and "asset" in params:
-            ad, asset = params["aligned_data"], params["asset"]
-            for k in ("4h","4H","H4"):
-                if k in ad:
-                    df_h4 = pd.DataFrame(
-                        {c: ad[k][c][asset] for c in ["open","high","low","close"]}
-                    ).dropna()
-                    break
-            for k in ("1D","1d","D1"):
-                if k in ad:
-                    df_d1 = pd.DataFrame(
-                        {c: ad[k][c][asset] for c in ["open","high","low","close"]}
-                    ).dropna()
-                    break
-
-        if df_h4 is not None and df_d1 is not None:
-            bias_h4 = calculate_market_bias(df_h4).reindex(df.index, method="ffill")
-            bias_d1 = calculate_market_bias(df_d1).reindex(df.index, method="ffill")
-            return calculate_mtf_filter(bias_h1, bias_h4, bias_d1).values
-        return bias_h1.values
-
-    # ── Machine d'état ────────────────────────────────────────────────────
-    def _run_state_machine(
+    def build_payload(
         self,
-        h_: np.ndarray,
-        l_: np.ndarray,
-        bear_eng: np.ndarray,
-        bull_eng: np.ndarray,
-        mtf_auth: np.ndarray,
-        bull_pool: list,
-        bear_pool: list,
-        w2: int,
-        horizon_h: int,
-        use_bias_filter: bool = True,
-        mono_position:   bool = True,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        df: pd.DataFrame,
+        asset: str,
+        tf: str,
+        params: dict
+    ) -> AlphaPayload:
+        # 0. Validation & Params
+        if "payload" not in params:
+            # Fallback robuste au Payload D (complet)
+            print(f"  ⚠️  {asset} — Parameter 'payload' missing. Falling back to 'D'.")
+            payload_type = "D"
+        else:
+            payload_type = params["payload"].upper()
+        
+        horizon_h = params.get("horizon_h", 8)
+        expiry_days = params.get("expiry_days", 3)
+        tf_minutes = params.get("tf_minutes", 15)
 
-        n             = len(h_)
-        signal        = np.zeros(n, float)
-        is_sweep      = np.zeros(n, bool)
+        # 1. Base Indicators (Vectorized)
+        eng = detect_engulfing(df)
+        eng_bull = eng["engulf_bull"].fillna(0).astype(bool)
+        eng_bear = eng["engulf_bear"].fillna(0).astype(bool)
 
-        phase         = 0      # 0=attente sweep  1=attente engulfing
-        direction     = 0      # +1 BUY  -1 SELL
-        sweep_bar     = -1
-        position_open = False
-        pos_close_bar = -1
+        # 2. MTF Filter Combined (H1-H4-D1)
+        mtf_filter = self._calculate_mtf_combined(df, asset, params)
 
-        for i in range(1, n):
+        # 3. Payload Selection logic
+        X = pd.Series(0.0, index=df.index)
 
-            # Fermeture automatique (uniquement si mono_position)
-            if mono_position and position_open and i >= pos_close_bar:
-                position_open = False
+        if payload_type == "A":
+            # Payload A: MTF Filter only
+            X = mtf_filter
 
-            next_i      = min(i + 1, n - 1)
-            bull_levels = list(set(bull_pool[i] + bull_pool[next_i]))
-            bear_levels = list(set(bear_pool[i] + bear_pool[next_i]))
+        elif payload_type == "B":
+            # Payload B: Engulfing only
+            X[eng_bull] = 1.0
+            X[eng_bear] = -1.0
 
-            swept_bull = bool(bull_levels) and l_[i] <= min(bull_levels)
-            swept_bear = bool(bear_levels) and h_[i] >= max(bear_levels)
+        elif payload_type == "C":
+            # Payload C: Engulfing + MTF Filter Aligned
+            X[(eng_bull) & (mtf_filter == 1.0)] = 1.0
+            X[(eng_bear) & (mtf_filter == -1.0)] = -1.0
 
-            # Priorité bear si les deux simultanément
-            if swept_bear and swept_bull:
-                swept_bull = False
+        elif payload_type == "D":
+            # Payload D: Complete Sequence
+            # (1) bias ACTIVE, (2) pool non-empty, (3) Price sweeps pool, (4) Engulfing within 8 bars
+            lq = get_stacked_liquidity(df, expiry_days=expiry_days, tf_minutes=tf_minutes)
+            
+            # Convert liquidity lists to Series booleans before calculations (as requested)
+            bull_pool_active = pd.Series([len(lvl) > 0 for lvl in lq["bull_pool"]], index=df.index)
+            bear_pool_active = pd.Series([len(lvl) > 0 for lvl in lq["bear_pool"]], index=df.index)
+            
+            # Get extreme levels for sweep detection
+            min_bull_lvl = pd.Series([min(lvl) if lvl else np.nan for lvl in lq["bull_pool"]], index=df.index)
+            max_bear_lvl = pd.Series([max(lvl) if lvl else np.nan for lvl in lq["bear_pool"]], index=df.index)
 
-            # Nouveau sweep — reset et démarre fenêtre w2
-            if swept_bear:
-                phase=1; direction=-1; sweep_bar=i; is_sweep[i]=True
-            elif swept_bull:
-                phase=1; direction=1;  sweep_bar=i; is_sweep[i]=True
+            # (3) Price hit
+            is_sweep_bull = bull_pool_active & (df["low"] <= min_bull_lvl)
+            is_sweep_bear = bear_pool_active & (df["high"] >= max_bear_lvl)
 
-            # Attente engulfing de confirmation
-            if phase == 1:
-                age2 = i - sweep_bar
-                if age2 > w2:
-                    phase = 0
-                else:
-                    bias_now     = mtf_auth[i]
-                    bias_ok_sell = (bias_now == -1) if use_bias_filter else True
-                    bias_ok_buy  = (bias_now ==  1) if use_bias_filter else True
-                    pos_free     = (not position_open) or (not mono_position)
+            # (1+2+3) Setup event (Bias + Pool + Sweep)
+            setup_bull = (mtf_filter == 1.0) & is_sweep_bull
+            setup_bear = (mtf_filter == -1.0) & is_sweep_bear
 
-                    if direction == -1 and bear_eng[i] and pos_free and bias_ok_sell:
-                        signal[i] = -1.
-                        if mono_position:
-                            position_open = True
-                            pos_close_bar = i + horizon_h
-                        phase = 0
+            # (4) Confirmation: Engulfing within 8 candles following the setup
+            # We look for a setup in the previous 8 bars [t-8, t-1]
+            has_setup_bull = setup_bull.rolling(window=8, min_periods=1).max().shift(1).fillna(0).astype(bool)
+            has_setup_bear = setup_bear.rolling(window=8, min_periods=1).max().shift(1).fillna(0).astype(bool)
 
-                    elif direction == 1 and bull_eng[i] and pos_free and bias_ok_buy:
-                        signal[i] = 1.
-                        if mono_position:
-                            position_open = True
-                            pos_close_bar = i + horizon_h
-                        phase = 0
+            # Signal emitted at the engulfing candle
+            X[eng_bull & has_setup_bull] = 1.0
+            X[eng_bear & has_setup_bear] = -1.0
 
-        return signal, is_sweep
+        else:
+            raise ValueError(f"Unknown payload type: {payload_type}")
 
-    # ── build_payload ──────────────────────────────────────────────────────
-    def build_payload(self, df, asset, tf, params) -> AlphaPayload:
-        p          = {**self.DEFAULT_PARAMS, **params, "asset": asset}
-        horizon_h  = int(p["horizon_h"])
-        w2         = int(p["w2_bars"])
-        tf_minutes = int(p["tf_minutes"])
-
-        df = df.copy()
-
-        eng      = detect_engulfing(df)
-        bear_eng = eng["engulf_bear"].notna().values
-        bull_eng = eng["engulf_bull"].notna().values
-        mtf_auth = self._compute_mtf_auth(df, p)
-
-        lq        = get_stacked_liquidity(df, expiry_days=p["expiry_days"],
-                                          tf_minutes=tf_minutes)
-
-        signal, _ = self._run_state_machine(
-            df["high"].values, df["low"].values,
-            bear_eng, bull_eng, mtf_auth,
-            lq["bull_pool"], lq["bear_pool"],
-            w2, horizon_h,
-            use_bias_filter=p.get("use_bias_filter", True),
-            mono_position=True,  # toujours True dans build_payload
-        )
-
-        signal_s   = pd.Series(signal, index=df.index)
-        valid_idx  = df.index[:-horizon_h]
-        X          = signal_s.loc[valid_idx]
+        # 4. Target Y Calculation
+        # Y = log(close.shift(-horizon_h) / close)
         Y_raw_full = np.log(df["close"].shift(-horizon_h) / df["close"])
-        Y_raw      = Y_raw_full.loc[valid_idx]
-        Y_dir      = Y_raw.copy()
-        Y_dir.loc[X == -1] = -Y_raw.loc[X == -1]
-        Y_flat     = Y_raw[X == 0].dropna()
+        
+        # Trim to valid indices
+        valid_idx = df.index[:-horizon_h]
+        X_final = X.loc[valid_idx]
+        Y_raw = Y_raw_full.loc[valid_idx]
 
-        sl_long  = ((df["close"] - df["low"])  / df["close"]).loc[valid_idx]
-        sl_short = ((df["high"]  - df["close"]) / df["close"]).loc[valid_idx]
+        # Directional Y: Inverse for shorts
+        Y_dir = Y_raw.copy()
+        Y_dir[X_final == -1.0] = -Y_raw[X_final == -1.0]
+
+        # Reference Y_flat (no signal)
+        Y_flat = Y_raw[X_final == 0.0].dropna()
+
+        # Calcul des SL (marge entre Close d'entrée et extrême récent de l'engulfing)
+        sl_long_raw = (df["close"] - df["low"].rolling(3).min()) / df["close"]
+        sl_short_raw = (df["high"].rolling(3).max() - df["close"]) / df["close"]
+        
+        sl_long = sl_long_raw.loc[valid_idx]
+        sl_short = sl_short_raw.loc[valid_idx]
 
         return AlphaPayload(
-            X=X, Y=Y_dir, asset=asset, tf=tf, horizon_h=horizon_h,
-            sl_long=sl_long, sl_short=sl_short, Y_flat=Y_flat,
+            X=X_final,
+            Y=Y_dir,
+            asset=asset,
+            tf=tf,
+            horizon_h=horizon_h,
+            sl_long=sl_long,
+            sl_short=sl_short,
+            Y_flat=Y_flat,
             meta={
+                "payload": payload_type,
                 "strategy_name": self.name,
-                "expiry_days":   p["expiry_days"],
-                "w2_bars":       w2,
-                "tf_minutes":    tf_minutes,
-                "horizon_h":     horizon_h,
-                "mtf_active":    "df_h4" in p or "aligned_data" in p,
-            },
+                "horizon_h": horizon_h
+            }
         )
 
-    # ── build_debug_df ─────────────────────────────────────────────────────
-    def build_debug_df(self, df: pd.DataFrame, params: dict,
-                        asset: str = "") -> pd.DataFrame:
-        p         = {**self.DEFAULT_PARAMS, **params}
-        if asset: p["asset"] = asset
-        horizon_h = int(p["horizon_h"])
-        w2        = int(p["w2_bars"])
-        tf_min    = int(p["tf_minutes"])
+    def _calculate_mtf_combined(self, df: pd.DataFrame, asset: str, params: dict) -> pd.Series:
+        """Helper to get aligned MTF filter using df_h4 and df_d1 from params."""
+        b_h1 = calculate_market_bias(df)
+        
+        df_h4 = params.get("df_h4")
+        df_d1 = params.get("df_d1")
 
-        df = df.copy()
+        if df_h4 is None or df_d1 is None:
+            # If MTF data missing, return single TF bias as fallback
+            return b_h1
 
-        eng = detect_engulfing(df)
-        df["engulf_bull"]    = eng["engulf_bull"]
-        df["engulf_bear"]    = eng["engulf_bear"]
-        df["bias"]           = calculate_market_bias(df)
-        mtf_auth             = self._compute_mtf_auth(df, p)
-        df["effective_bias"] = pd.Series(mtf_auth, index=df.index)
+        b_h4 = calculate_market_bias(df_h4).reindex(df.index, method="ffill").fillna(0.0)
+        b_d1 = calculate_market_bias(df_d1).reindex(df.index, method="ffill").fillna(0.0)
 
-        # Pools — réutiliser si pré-calculés
-        if "_bull_pool" in p and "_bear_pool" in p:
-            bull_pool = p["_bull_pool"]
-            bear_pool = p["_bear_pool"]
-        else:
-            lq        = get_stacked_liquidity(df, expiry_days=p["expiry_days"],
-                                              tf_minutes=tf_min)
-            bull_pool = lq["bull_pool"]
-            bear_pool = lq["bear_pool"]
-
-        df["bull_pool_lvl"] = pd.Series(
-            [min(lvls) if lvls else np.nan for lvls in bull_pool],
-            index=df.index,
-        )
-        df["bear_pool_lvl"] = pd.Series(
-            [max(lvls) if lvls else np.nan for lvls in bear_pool],
-            index=df.index,
-        )
-
-        bear_eng = df["engulf_bear"].notna().values
-        bull_eng = df["engulf_bull"].notna().values
-
-        signal, is_sweep = self._run_state_machine(
-            df["high"].values, df["low"].values,
-            bear_eng, bull_eng, mtf_auth,
-            bull_pool, bear_pool,
-            w2, horizon_h,
-            use_bias_filter=p.get("use_bias_filter", True),
-            mono_position=p.get("mono_position", True),
-        )
-
-        df["signal"]   = signal
-        df["is_sweep"] = is_sweep
-        df["is_pivot"] = np.zeros(len(df), bool)  # compatibilité debug
-
-        return df
+        raw_mtf = calculate_mtf_filter(b_h1, b_h4, b_d1)
+        
+        # Transition Buffer (Loi 5) : On ne change de régime que s'il persiste sur 5 barres
+        roll_sum = raw_mtf.rolling(window=5, min_periods=1).sum()
+        
+        buffered = pd.Series(np.nan, index=df.index)
+        buffered[roll_sum == 5.0] = 1.0
+        buffered[roll_sum == -5.0] = -1.0
+        
+        return buffered.ffill().fillna(0.0)
